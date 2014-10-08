@@ -1150,7 +1150,8 @@ class LDAPCreate(BaseLDAPCommand, crud.Create):
         _check_limit_object_class(self.api.Backend.ldap2.schema.attribute_types(self.obj.disallow_object_classes), entry_attrs.keys(), allow_only=False)
 
         try:
-            self._exc_wrapper(keys, options, ldap.add_entry)(entry_attrs)
+            func = self._exc_wrapper(keys, options, ldap.add_entry)
+            result = func(entry_attrs, attrs_list=attrs_list)
         except errors.NotFound:
             parent = self.obj.parent_object
             if parent:
@@ -1168,22 +1169,25 @@ class LDAPCreate(BaseLDAPCommand, crud.Create):
         except errors.DuplicateEntry:
             self.obj.handle_duplicate_entry(*keys)
 
-        try:
-            if self.obj.rdn_attribute:
-                # make sure objectclass is either set or None
-                if self.obj.object_class:
-                    object_class = self.obj.object_class
+        if result is None:
+            try:
+                if self.obj.rdn_attribute:
+                    # make sure objectclass is either set or None
+                    if self.obj.object_class:
+                        object_class = self.obj.object_class
+                    else:
+                        object_class = None
+                    entry_attrs = self._exc_wrapper(keys, options, ldap.find_entry_by_attr)(
+                        self.obj.primary_key.name, keys[-1], object_class, attrs_list,
+                        DN(self.obj.container_dn, api.env.basedn)
+                    )
                 else:
-                    object_class = None
-                entry_attrs = self._exc_wrapper(keys, options, ldap.find_entry_by_attr)(
-                    self.obj.primary_key.name, keys[-1], object_class, attrs_list,
-                    DN(self.obj.container_dn, api.env.basedn)
-                )
-            else:
-                entry_attrs = self._exc_wrapper(keys, options, ldap.get_entry)(
-                    entry_attrs.dn, attrs_list)
-        except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+                    entry_attrs = self._exc_wrapper(keys, options, ldap.get_entry)(
+                        entry_attrs.dn, attrs_list)
+            except errors.NotFound:
+                self.obj.handle_not_found(*keys)
+        else:
+            entry_attrs = result
 
         for callback in self.get_callbacks('post'):
             entry_attrs.dn = callback(

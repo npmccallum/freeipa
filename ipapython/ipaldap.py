@@ -45,6 +45,7 @@ from ipapython.ipautil import (
 from ipapython.ipa_log_manager import log_mgr
 from ipapython.dn import DN, RDN
 from ipapython.dnsutil import DNSName
+from ldap.controls.readentry import PostReadControl
 
 # Global variable to define SASL auth
 SASL_GSSAPI = ldap.sasl.sasl({}, 'GSSAPI')
@@ -1577,7 +1578,7 @@ class LDAPClient(object):
             raise errors.LimitsExceeded()
         return entries[0]
 
-    def add_entry(self, entry, entry_attrs=None):
+    def add_entry(self, entry, entry_attrs=None, attrs_list=None):
         """Create a new entry.
 
         This should be called as add_entry(entry).
@@ -1589,9 +1590,20 @@ class LDAPClient(object):
         attrs = dict((k, v) for k, v in entry.raw.iteritems() if v)
 
         with self.error_handler():
-            self.conn.add_s(entry.dn, attrs.items())
+            if attrs_list is None:
+                self.conn.add_s(entry.dn, attrs.items())
+                ctrls = []
+            else:
+                ctrls = [PostReadControl(True, attrs_list),]
+                ctrls = self.conn.add_ext_s(entry.dn, attrs.items(), ctrls)[3]
 
         entry.reset_modlist()
+
+        for ctrl in ctrls:
+            if isinstance(ctrl, PostReadControl):
+                return self.conn.convert_result(((ctrl.dn, ctrl.entry),))[0]
+
+        return None
 
     def update_entry_rdn(self, dn, new_rdn, del_old=True):
         """
