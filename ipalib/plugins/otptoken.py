@@ -21,13 +21,11 @@ from ipalib.plugins.baseldap import DN, LDAPObject, LDAPAddMember, LDAPRemoveMem
 from ipalib.plugins.baseldap import LDAPCreate, LDAPDelete, LDAPUpdate, LDAPSearch, LDAPRetrieve
 from ipalib import api, Int, Str, Bool, DateTime, Flag, Bytes, IntEnum, StrEnum, Password, _, ngettext
 from ipalib.plugable import Registry
-from ipalib.errors import PasswordMismatch, ConversionError, LastMemberError, NotFound, ValidationError
-from ipalib.request import context
+from ipalib.errors import PasswordMismatch, ConversionError, NotFound, ValidationError
 from ipalib.frontend import Local
 
 from backports.ssl_match_hostname import match_hostname
 import base64
-import uuid
 import urllib
 import urllib2
 import httplib
@@ -279,10 +277,10 @@ class otptoken_add(LDAPCreate):
     )
 
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
-        # Fill in a default UUID when not specified.
+        # Generate a UUID when not specified.
         if entry_attrs.get('ipatokenuniqueid', None) is None:
-            entry_attrs['ipatokenuniqueid'] = str(uuid.uuid4())
-            dn = DN("ipatokenuniqueid=%s" % entry_attrs['ipatokenuniqueid'], dn)
+            entry_attrs['ipatokenuniqueid'] = u'autogenerate'
+            dn = DN("ipatokenuniqueid=autogenerate", dn)
 
         if not _check_interval(options.get('ipatokennotbefore', None),
                                options.get('ipatokennotafter', None)):
@@ -311,38 +309,49 @@ class otptoken_add(LDAPCreate):
         # Resolve the owner's dn
         _normalize_owner(self.api.Object.user, entry_attrs)
 
-        # Get the issuer for the URI
-        owner = entry_attrs.get('ipatokenowner', None)
-        issuer = api.env.realm
-        if owner is not None:
-            try:
-                issuer = ldap.get_entry(owner, ['krbprincipalname'])['krbprincipalname'][0]
-            except (NotFound, IndexError):
-                pass
-
-        # Build the URI parameters
-        args = {}
-        args['issuer'] = issuer
-        args['secret'] = base64.b32encode(entry_attrs['ipatokenotpkey'])
-        args['digits'] = entry_attrs['ipatokenotpdigits']
-        args['algorithm'] = entry_attrs['ipatokenotpalgorithm']
-        if options['type'] == 'totp':
-            args['period'] = entry_attrs['ipatokentotptimestep']
-        elif options['type'] == 'hotp':
-            args['counter'] = entry_attrs['ipatokenhotpcounter']
-
-        # Build the URI
-        label = urllib.quote(entry_attrs['ipatokenuniqueid'])
-        parameters = urllib.urlencode(args)
-        uri = u'otpauth://%s/%s:%s?%s' % (options['type'], issuer, label, parameters)
-        setattr(context, 'uri', uri)
-
         attrs_list.append("objectclass")
         return dn
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
-        entry_attrs['uri'] = getattr(context, 'uri')
         _set_token_type(entry_attrs, **options)
+
+        # Depending on ACIs, the token parameters will be either
+        # in entry_attrs or options. Handle either case.
+        def get(name):
+            if entry_attrs.has_key(name):
+                return entry_attrs[name][0]
+
+            return options[name]
+
+        # Get the issuer for the URI
+        issuer = api.env.realm
+        try:
+            owner = entry_attrs.get('ipatokenowner', [])[0]
+            issuer = ldap.get_entry(owner, ['krbprincipalname'])['krbprincipalname'][0]
+        except (NotFound, IndexError):
+            pass
+
+        # Build the URI parameters
+        args = {}
+        args['issuer'] = issuer
+        args['secret'] = base64.b32encode(get('ipatokenotpkey'))
+        args['digits'] = get('ipatokenotpdigits')
+        args['algorithm'] = get('ipatokenotpalgorithm')
+        if options['type'] == 'totp':
+            args['period'] = get('ipatokentotptimestep')
+        elif options['type'] == 'hotp':
+            args['counter'] = get('ipatokenhotpcounter')
+
+        # Build the URI
+        label = urllib.quote(get('ipatokenuniqueid'))
+        parameters = urllib.urlencode(args)
+        entry_attrs['uri'] = u'otpauth://%s/%s:%s?%s' % (
+            options['type'],
+            issuer,
+            label,
+            parameters
+        )
+
         _convert_owner(self.api.Object.user, entry_attrs, options)
         return super(otptoken_add, self).post_callback(ldap, dn, entry_attrs, *keys, **options)
 
